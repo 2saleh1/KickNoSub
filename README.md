@@ -6,11 +6,16 @@
 
 ## ✨ Features
 
-- **Instant Paywall Bypass:** Automatically detects and removes subscriber-only overlay paywalls on Kick VODs.
+- **Instant Paywall Bypass:** Zero-delay detection via targeted container scanning and SPA route hooks (`pushState`/`replaceState`).
+- **Seamless Theater Mode:** Immersive edge-to-edge layout with video and synchronized chat side-by-side, without black screen issues.
+- **Picture-in-Picture (PiP):** Detach and pop out the video to watch while browsing other tabs or apps.
+- **Collapsible Replay Chat:** Synchronized VOD chat replay with toggle control and responsive font sizing.
+- **Quick Seek Buttons:** Dedicated 10-second rewind & forward buttons alongside visual seek indicators.
+- **Speed Controls & Hotkeys:** Cycle speeds from 0.5x up to 2.0x via on-screen menu or instant `<` and `>` keyboard shortcuts.
+- **Toast Notifications:** Modern floating toasts confirming player actions, speed adjustments, and mode toggles.
 - **Embedded HLS Player:** High-performance video player powered by `hls.js`, supporting multi-quality playback (1080p60, 720p, 480p, 360p, Auto).
-- **Full Player Controls:** Smooth scrubbing timeline, volume slider, keyboard shortcuts (Space, F for fullscreen, M for mute, arrow keys for seeking).
 - **Direct Stream Extraction:** Quick-action button to copy the direct `.m3u8` master manifest URL for VLC, mpv, or external downloading.
-- **Background Service Worker Pipeline:** Efficient stream resolution and session minting without compromising browser performance.
+- **Background Service Worker Pipeline:** Parallel stream resolution and session minting without compromising browser performance.
 
 ---
 
@@ -53,6 +58,12 @@ Then load the folder via `chrome://extensions` as shown above.
 |---|---|
 | `Space` or `K` | Play / Pause |
 | `F` | Toggle Fullscreen |
+| `T` or `Alt+T` | Toggle Theater Mode |
+| `P` | Toggle Picture-in-Picture (PiP) |
+| `C` | Toggle Chat (Collapse / Expand) |
+| `>` or `.` | Increase Playback Speed |
+| `<` or `,` | Decrease Playback Speed |
+| `Esc` | Exit Theater Mode / Fullscreen |
 | `M` | Mute / Unmute |
 | `←` / `→` | Seek 5 seconds backward / forward |
 | `J` / `L` | Seek 10 seconds backward / forward |
