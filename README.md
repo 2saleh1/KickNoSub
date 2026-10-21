@@ -9,6 +9,7 @@
 - **Instant Paywall Bypass:** Zero-delay detection via targeted container scanning and SPA route hooks (`pushState`/`replaceState`).
 - **Seamless Theater Mode:** Immersive edge-to-edge layout with video and synchronized chat side-by-side, without black screen issues.
 - **Picture-in-Picture (PiP):** Detach and pop out the video to watch while browsing other tabs or apps.
+- **Continuous VOD Chat Replay:** Continuous, real-time synchronized VOD chat stream using Kick's official history timeline API, preventing chat freezes or dropouts.
 - **Collapsible Replay Chat:** Synchronized VOD chat replay with toggle control and responsive font sizing.
 - **Quick Seek Buttons:** Dedicated 10-second rewind & forward buttons alongside visual seek indicators.
 - **Speed Controls & Hotkeys:** Cycle speeds from 0.5x up to 2.0x via on-screen menu or instant `<` and `>` keyboard shortcuts.

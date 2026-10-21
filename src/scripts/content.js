@@ -145,8 +145,10 @@ function checkStreamUrl(url) {
 
 function parseUtcDate(value) {
     if (!value) return null;
-    let text = String(value).replace(' ', 'T');
-    if (!text.endsWith('Z')) text += 'Z';
+    let text = String(value).trim().replace(' ', 'T');
+    if (!text.includes('Z') && !text.includes('+') && !text.match(/-\d{2}:\d{2}$/)) {
+        text += 'Z';
+    }
     const date = new Date(text);
     return isNaN(date.getTime()) ? null : date;
 }
@@ -619,9 +621,7 @@ async function findStreamUrlFromMetadata(metadata) {
         return null;
     }
 
-    let startTimeStr = (video?.start_time || video?.created_at || video?.livestream?.start_time || '').replace(' ', 'T');
-    if (startTimeStr && !startTimeStr.endsWith('Z')) startTimeStr += 'Z';
-    const startTime = startTimeStr ? new Date(startTimeStr) : new Date();
+    const startTime = parseUtcDate(video?.start_time || video?.created_at || video?.livestream?.start_time) || new Date();
 
     const baseUrls = [
         "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518",
@@ -663,8 +663,9 @@ async function findStreamUrlFromMetadata(metadata) {
 }
 
 class ChatController {
-    constructor(channelId, videoStartTime, targetContainers) {
+    constructor(channelId, channelSlug, videoStartTime, targetContainers) {
         this.channelId = channelId;
+        this.channelSlug = channelSlug || null;
         this.videoStartTime = videoStartTime;
         this.containers = Array.isArray(targetContainers) ? targetContainers : [targetContainers].filter(Boolean);
         this.messages = [];
@@ -720,11 +721,11 @@ class ChatController {
             this.lastRenderedMsgId = null;
             this.updateUI(videoElement.currentTime);
 
-            // Debounce network sync so arrow keys can be tapped rapidly without freezing
+            // Debounce network sync so rapid seeking doesn't spam fetchLoop restarts
             clearTimeout(this.seekDebounceTimer);
             this.seekDebounceTimer = setTimeout(() => {
                 this.handleSeekSync(videoElement.currentTime);
-            }, 300);
+            }, 250);
         };
 
         videoElement.addEventListener('seeking', handleSeek);
@@ -737,22 +738,30 @@ class ChatController {
     handleSeekSync(currentTime) {
         const vidT = this.videoStartTime.getTime() + (currentTime * 1000);
 
-        // Check if currentTime is within already fetched range
+        // Check if currentTime is within already fetched range with a comfortable forward margin
         if (this.messages.length > 0) {
             const firstT = new Date(this.messages[0].created_at).getTime();
             const lastT = new Date(this.messages[this.messages.length - 1].created_at).getTime();
-            if (vidT >= firstT && vidT <= lastT - 10000) {
+            if (vidT >= firstT && vidT <= lastT - 15000) {
                 this.updateUI(currentTime);
                 return;
             }
         }
 
-        // Outside range, start a fresh fetch session with a 30s buffer
+        // Outside range, start a fresh forward fetch session
         this.activeSessionId++;
         this.lastRenderedMsgId = null;
         for (const b of this.syncBadges) {
             if (b && b.isConnected) b.classList.add('visible');
         }
+
+        // Retain recent messages before the seek point, remove distant future ones
+        const seekWindowStart = vidT - 15000;
+        this.messages = this.messages.filter(m => {
+            const mt = new Date(m.created_at).getTime();
+            return mt >= seekWindowStart - 60000 && mt <= vidT;
+        });
+
         this.fetchLoop(this.activeSessionId, true);
     }
 
@@ -763,65 +772,120 @@ class ChatController {
         );
     }
 
+    async resolveNumericalChannelId() {
+        if (this.channelId && !isNaN(Number(this.channelId))) {
+            return Number(this.channelId);
+        }
+        const slug = this.channelSlug || window.location.pathname.split('/').filter(Boolean)[0] || '';
+        if (slug) {
+            try {
+                const chanData = await fetchJson(`https://kick.com/api/v2/channels/${slug}`) ||
+                                 await fetchJson(`https://web.kick.com/api/v1/channels/${slug}`);
+                const numId = chanData?.chatroom?.id || chanData?.id || chanData?.channel_id;
+                if (numId) {
+                    this.channelId = numId;
+                    return numId;
+                }
+            } catch (e) {}
+        }
+        return this.channelId;
+    }
+
     async fetchLoop(sessionId, isSeek = false) {
-        let currentCursor = null;
+        const channelId = await this.resolveNumericalChannelId();
+        if (!channelId || this.activeSessionId !== sessionId) return;
+
+        // Determine starting fetch time: 15s before current video playback
+        let nextFetchTime;
+        if (this.videoElement) {
+            const bufferedSeconds = Math.max(0, this.videoElement.currentTime - 15);
+            nextFetchTime = new Date(this.videoStartTime.getTime() + (bufferedSeconds * 1000));
+        } else {
+            nextFetchTime = new Date(this.videoStartTime.getTime());
+        }
+
         while (this.activeSessionId === sessionId) {
             try {
-                let url = `https://web.kick.com/api/v2/channels/${this.channelId}/messages`;
-                if (currentCursor) {
-                    url += `?cursor=${currentCursor}`;
-                } else {
-                    let targetTime = this.videoStartTime;
-                    if (this.videoElement) {
-                        // 30s buffer before seek time guarantees messages are found even when paused!
-                        const bufferedSeconds = Math.max(0, this.videoElement.currentTime - 30);
-                        targetTime = new Date(this.videoStartTime.getTime() + (bufferedSeconds * 1000));
+                // If video element exists, check how far ahead we've fetched
+                if (this.videoElement) {
+                    const videoAbsTime = this.videoStartTime.getTime() + (this.videoElement.currentTime * 1000);
+                    const aheadMs = nextFetchTime.getTime() - videoAbsTime;
+
+                    // If we've buffered more than 45s ahead of current playback, throttle polling
+                    if (aheadMs > 45000) {
+                        await new Promise(r => setTimeout(r, 1000));
+                        continue;
                     }
-                    url += `?start_time=${targetTime.toISOString()}`;
                 }
 
+                const timeStr = encodeURIComponent(nextFetchTime.toISOString());
+                let url = `https://web.kick.com/api/v1/chat/${channelId}/history?start_time=${timeStr}`;
                 let data = await fetchJson(url);
-                if (!data) {
-                    url = url.replace('web.kick.com', 'kick.com');
+                if (!data || !data.data) {
+                    url = `https://kick.com/api/v1/chat/${channelId}/history?start_time=${timeStr}`;
                     data = await fetchJson(url);
                 }
-                if (!data) { await new Promise(r => setTimeout(r, 2000)); continue; }
+
                 if (this.activeSessionId !== sessionId) break;
 
-                const msgs = data.messages || (data.data && data.data.messages) || [];
-                if (msgs.length) {
-                    if (isSeek && currentCursor === null) {
-                        this.messages = msgs;
-                    } else {
-                        msgs.forEach(msg => {
-                            if (!this.messages.some(m => m.id === msg.id)) this.messages.push(msg);
-                        });
-                    }
+                const msgs = (data && data.data && Array.isArray(data.data.messages)) ? data.data.messages : [];
+
+                if (msgs.length > 0) {
+                    let latestMsgTime = 0;
+                    msgs.forEach(msg => {
+                        const msgTime = new Date(msg.created_at).getTime();
+                        if (msgTime > latestMsgTime) latestMsgTime = msgTime;
+                        if (!this.messages.some(m => m.id === msg.id)) {
+                            this.messages.push(msg);
+                        }
+                    });
+
                     this.messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+                    // Prune older messages if buffer grows beyond 600 items
+                    if (this.messages.length > 600 && this.videoElement) {
+                        const pruneBefore = this.videoStartTime.getTime() + ((this.videoElement.currentTime - 120) * 1000);
+                        this.messages = this.messages.filter(m => new Date(m.created_at).getTime() >= pruneBefore);
+                    }
+
                     for (const b of this.syncBadges) {
                         if (b && b.isConnected) b.classList.remove('visible');
                     }
-                    if (this.videoElement) this.updateUI(this.videoElement.currentTime);
-                }
 
-                currentCursor = data.cursor || (data.data && data.data.cursor) || data.next_cursor;
-                if (!currentCursor) {
-                    currentCursor = null;
-                    await new Promise(r => setTimeout(r, 2000));
-                } else {
-                    if (this.messages.length && this.videoElement) {
-                        const lastT = new Date(this.messages[this.messages.length - 1].created_at).getTime();
-                        const vidT = this.videoStartTime.getTime() + (this.videoElement.currentTime * 1000);
-                        if (lastT > vidT + 60000) await new Promise(r => setTimeout(r, 1000));
-                        else await new Promise(r => setTimeout(r, 50));
+                    if (this.videoElement) {
+                        this.updateUI(this.videoElement.currentTime);
+                    }
+
+                    // Advance nextFetchTime: 1s past the newest message, or at least +3s from previous
+                    const candidateTime = latestMsgTime + 1000;
+                    if (candidateTime > nextFetchTime.getTime()) {
+                        nextFetchTime = new Date(candidateTime);
                     } else {
-                        await new Promise(r => setTimeout(r, 50));
+                        nextFetchTime = new Date(nextFetchTime.getTime() + 3000);
+                    }
+
+                    await new Promise(r => setTimeout(r, 120));
+                } else {
+                    // No messages in current 5-second slice: advance time window
+                    nextFetchTime = new Date(nextFetchTime.getTime() + 5000);
+
+                    if (this.videoElement) {
+                        const videoAbsTime = this.videoStartTime.getTime() + (this.videoElement.currentTime * 1000);
+                        if (nextFetchTime.getTime() > videoAbsTime + 30000) {
+                            await new Promise(r => setTimeout(r, 1000));
+                        } else {
+                            await new Promise(r => setTimeout(r, 150));
+                        }
+                    } else {
+                        await new Promise(r => setTimeout(r, 500));
                     }
                 }
             } catch (e) {
+                console.warn("[Kick Unlocker] Chat fetch loop error:", e);
                 await new Promise(r => setTimeout(r, 2000));
             }
         }
+
         if (this.activeSessionId === sessionId) {
             for (const b of this.syncBadges) {
                 if (b && b.isConnected) b.classList.remove('visible');
@@ -855,8 +919,11 @@ class ChatController {
 
         for (const list of this.chatLists) {
             if (list && list.isConnected) {
+                const isNearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 80;
                 list.innerHTML = html;
-                list.scrollTop = list.scrollHeight;
+                if (isNearBottom || this.lastRenderedMsgId === null) {
+                    list.scrollTop = list.scrollHeight;
+                }
             }
         }
         this.lastRenderedMsgId = lastM.id;
@@ -1079,8 +1146,8 @@ async function unlockVideo(triggerElement) {
         const btnChatClose = container.querySelector('#k-chat-close-btn');
 
         const chatTargets = [existingChat, theaterChatInner].filter(Boolean);
-        const startTime = new Date((result.video?.start_time || result.video?.created_at || '').replace(' ', 'T') + ((result.video?.start_time || result.video?.created_at || '').endsWith('Z') ? '' : 'Z'));
-        const chatController = new ChatController(result.channelId, startTime, chatTargets);
+        const startTime = parseUtcDate(result.video?.start_time || result.video?.created_at || result.video?.livestream?.start_time) || new Date();
+        const chatController = new ChatController(result.channelId, result.channelSlug, startTime, chatTargets);
         activeChatController = chatController;
         chatController.init(null);
 
